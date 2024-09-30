@@ -26,6 +26,7 @@ db.serialize(() => {
         sensor_id INTEGER,
         temperatura REAL,
         umidade REAL,
+        vibracao REAL,   -- Adicionei a vírgula que faltava aqui
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
     )`);
 });
@@ -57,6 +58,26 @@ app.post('/register', async (req, res) => {
         res.status(500).json({ message: 'Erro ao processar o cadastro' });
     }
 });
+
+// Middleware de validação de dados
+const validateSensorData = (req, res, next) => {
+    const { sensor_id, temperatura, umidade, vibracao } = req.body;
+
+    if (!sensor_id || typeof sensor_id !== 'number') {
+        return res.status(400).json({ message: 'ID do sensor inválido ou ausente.' });
+    }
+    if (!temperatura || typeof temperatura !== 'number') {
+        return res.status(400).json({ message: 'Temperatura inválida ou ausente.' });
+    }
+    if (!umidade || typeof umidade !== 'number') {
+        return res.status(400).json({ message: 'Umidade inválida ou ausente.' });
+    }
+    if (!vibracao || typeof vibracao !== 'number') {
+        return res.status(400).json({ message: 'Vibração inválida ou ausente.' });
+    }
+
+    next();
+};
 
 // Rota para login
 app.post('/login', (req, res) => {
@@ -115,12 +136,13 @@ app.get('/dados-sensores', authenticateJWT, (req, res) => {
     });
 });
 
-app.post('/dados-sensores', (req, res) => {
+// Inserção de dados dos sensores (agora incluindo vibração)
+app.post('/dados-sensores', authenticateJWT, validateSensorData, (req, res) => {
     const dados = req.body;
     console.log('Dados recebidos dos sensores:', dados);
 
-    db.run(`INSERT INTO dados_sensores (sensor_id, temperatura, umidade) VALUES (?, ?, ?)`,
-        [dados.sensor_id, dados.temperatura, dados.umidade],
+    db.run(`INSERT INTO dados_sensores (sensor_id, temperatura, umidade, vibracao) VALUES (?, ?, ?, ?)`,
+        [dados.sensor_id, dados.temperatura, dados.umidade, dados.vibracao],
         (err) => {
             if (err) {
                 console.error('Erro ao inserir dados no banco de dados:', err.message);
