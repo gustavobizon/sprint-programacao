@@ -6,19 +6,20 @@ const cors = require('cors');
 
 const app = express();
 const PORT = 3000;
-const SECRET_KEY = 'sua_chave_secreta'; // Substitua por uma chave secreta mais segura em produção
+const SECRET_KEY = 'sua_chave_secreta';
 
 app.use(express.json());
-app.use(cors()); // Habilita o CORS para todas as origens
+app.use(cors());
 
 const db = new sqlite3.Database('banco-de-dados.db');
 
-// Lógica para criar as tabelas se elas não existirem
 db.serialize(() => {
     db.run(`CREATE TABLE IF NOT EXISTS usuarios (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         username TEXT UNIQUE,
-        password TEXT
+        password TEXT,
+        dogName TEXT UNIQUE,
+        role TEXT DEFAULT 'user'  -- Adicionando a coluna role
     )`);
 
     db.run(`CREATE TABLE IF NOT EXISTS dados_sensores (
@@ -26,26 +27,24 @@ db.serialize(() => {
         sensor_id INTEGER,
         temperatura REAL,
         umidade REAL,
-        vibracao REAL,   -- Adicionei a vírgula que faltava aqui
+        vibracao REAL,
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
     )`);
 });
 
 // Rota para cadastrar um novo usuário
 app.post('/register', async (req, res) => {
-    const { username, password } = req.body;
+    const { username, password, dogName, role = 'user' } = req.body;  // Role padrão para 'user'
     try {
-        // Verificar se o usuário já existe
         db.get('SELECT * FROM usuarios WHERE username = ?', [username], async (err, row) => {
             if (row) {
                 return res.status(400).json({ message: 'Usuário já existe' });
             }
 
-            // Criptografar a senha
             const hashedPassword = await bcrypt.hash(password, 10);
 
-            // Inserir o novo usuário na tabela
-            db.run('INSERT INTO usuarios (username, password) VALUES (?, ?)', [username, hashedPassword], (err) => {
+            db.run('INSERT INTO usuarios (username, password, dogName, role) VALUES (?, ?, ?, ?)', 
+                [username, hashedPassword, dogName, role], (err) => {
                 if (err) {
                     console.error('Erro ao cadastrar usuário:', err.message);
                     return res.status(500).json({ message: 'Erro ao cadastrar usuário' });
@@ -59,21 +58,60 @@ app.post('/register', async (req, res) => {
     }
 });
 
+// Rota para recuperação de senha
+app.post('/recover-password', async (req, res) => {
+    const { username, dogName } = req.body;
+
+    db.get('SELECT * FROM usuarios WHERE username = ? AND dogName = ?', [username, dogName], async (err, row) => {
+        if (!row) {
+            return res.status(400).json({ message: 'Usuário ou nome do cachorro incorretos' });
+        }
+
+        res.json({ message: 'Validação bem-sucedida.', password: row.password });
+    });
+});
+
+// Rota para alterar a senha
+app.post('/change-password', async (req, res) => {
+    const { username, newPassword } = req.body;
+
+    db.get('SELECT * FROM usuarios WHERE username = ?', [username], (err, row) => {
+        if (err) {
+            return res.status(500).json({ message: 'Erro ao acessar o banco de dados.' });
+        }
+        if (!row) {
+            return res.status(400).json({ message: 'Usuário não encontrado.' });
+        }
+
+        const hashedPassword = bcrypt.hashSync(newPassword, 10);
+        db.run('UPDATE usuarios SET password = ? WHERE username = ?', [hashedPassword, username], function(err) {
+            if (err) {
+                return res.status(500).json({ message: 'Erro ao atualizar a senha.' });
+            }
+            return res.json({ message: 'Senha alterada com sucesso!' });
+        });
+    });
+});
+
 // Middleware de validação de dados
 const validateSensorData = (req, res, next) => {
-    const { sensor_id, temperatura, umidade, vibracao } = req.body;
+    const dadosArray = Array.isArray(req.body) ? req.body : [req.body];
 
-    if (!sensor_id || typeof sensor_id !== 'number') {
-        return res.status(400).json({ message: 'ID do sensor inválido ou ausente.' });
-    }
-    if (!temperatura || typeof temperatura !== 'number') {
-        return res.status(400).json({ message: 'Temperatura inválida ou ausente.' });
-    }
-    if (!umidade || typeof umidade !== 'number') {
-        return res.status(400).json({ message: 'Umidade inválida ou ausente.' });
-    }
-    if (!vibracao || typeof vibracao !== 'number') {
-        return res.status(400).json({ message: 'Vibração inválida ou ausente.' });
+    for (const dados of dadosArray) {
+        const { sensor_id, temperatura, umidade, vibracao } = dados;
+
+        if (!sensor_id || typeof sensor_id !== 'number') {
+            return res.status(400).json({ message: 'ID do sensor inválido ou ausente.' });
+        }
+        if (!temperatura || typeof temperatura !== 'number') {
+            return res.status(400).json({ message: 'Temperatura inválida ou ausente.' });
+        }
+        if (!umidade || typeof umidade !== 'number') {
+            return res.status(400).json({ message: 'Umidade inválida ou ausente.' });
+        }
+        if (!vibracao || typeof vibracao !== 'number') {
+            return res.status(400).json({ message: 'Vibração inválida ou ausente.' });
+        }
     }
 
     next();
@@ -83,20 +121,17 @@ const validateSensorData = (req, res, next) => {
 app.post('/login', (req, res) => {
     const { username, password } = req.body;
 
-    // Verificar se o usuário existe
     db.get('SELECT * FROM usuarios WHERE username = ?', [username], async (err, row) => {
         if (!row) {
             return res.status(400).json({ message: 'Usuário ou senha incorretos' });
         }
 
-        // Verificar a senha
         const isPasswordValid = await bcrypt.compare(password, row.password);
         if (!isPasswordValid) {
             return res.status(400).json({ message: 'Usuário ou senha incorretos' });
         }
 
-        // Gerar o token JWT
-        const token = jwt.sign({ userId: row.id }, SECRET_KEY, { expiresIn: '1h' });
+        const token = jwt.sign({ userId: row.id, role: row.role }, SECRET_KEY, { expiresIn: '1h' });  // Incluindo role no token
         res.json({ message: 'Login realizado com sucesso', token });
     });
 });
@@ -110,7 +145,7 @@ const authenticateJWT = (req, res, next) => {
             if (err) {
                 return res.status(403).json({ message: 'Acesso negado' });
             }
-            req.user = user;
+            req.user = user;  // `user` agora inclui a role
             next();
         });
     } else {
@@ -118,12 +153,19 @@ const authenticateJWT = (req, res, next) => {
     }
 };
 
-// Rota para buscar todos os dados dos sensores (protegida por JWT)
-app.get('/dados-sensores', authenticateJWT, (req, res) => {
-    if (isServicePaused) {
-        return res.status(200).json({ message: 'O serviço está pausado. Nenhum dado será enviado.' });
-    }
+// Middleware para verificar roles
+const authorizeRoles = (...allowedRoles) => {
+    return (req, res, next) => {
+        const userRole = req.user.role;
+        if (!allowedRoles.includes(userRole)) {
+            return res.status(403).json({ message: 'Acesso negado' });
+        }
+        next();
+    };
+};
 
+// Rota para buscar todos os dados dos sensores 
+app.get('/dados-sensores', authenticateJWT, authorizeRoles('admin', 'user'), (req, res) => {
     const query = `SELECT * FROM dados_sensores`;
 
     db.all(query, [], (err, rows) => {
@@ -136,25 +178,37 @@ app.get('/dados-sensores', authenticateJWT, (req, res) => {
     });
 });
 
-// Inserção de dados dos sensores (agora incluindo vibração)
+// Inserção de dados dos sensores
 app.post('/dados-sensores', authenticateJWT, validateSensorData, (req, res) => {
-    const dados = req.body;
-    console.log('Dados recebidos dos sensores:', dados);
+    const dadosArray = Array.isArray(req.body) ? req.body : [req.body];
+    console.log('Dados recebidos dos sensores:', dadosArray);
 
-    db.run(`INSERT INTO dados_sensores (sensor_id, temperatura, umidade, vibracao) VALUES (?, ?, ?, ?)`,
-        [dados.sensor_id, dados.temperatura, dados.umidade, dados.vibracao],
-        (err) => {
-            if (err) {
-                console.error('Erro ao inserir dados no banco de dados:', err.message);
-                res.status(500).send('Erro ao processar os dados.');
-            } else {
-                console.log('Dados inseridos no banco de dados com sucesso.');
-                res.send('Dados recebidos e armazenados com sucesso.');
-            }
+    const insertPromises = dadosArray.map(dados => {
+        return new Promise((resolve, reject) => {
+            db.run(`INSERT INTO dados_sensores (sensor_id, temperatura, umidade, vibracao) VALUES (?, ?, ?, ?)`,
+                [dados.sensor_id, dados.temperatura, dados.umidade, dados.vibracao],
+                (err) => {
+                    if (err) {
+                        console.error('Erro ao inserir dados no banco de dados:', err.message);
+                        reject(err);
+                    } else {
+                        resolve();
+                    }
+                });
+        });
+    });
+
+    Promise.all(insertPromises)
+        .then(() => {
+            console.log('Dados inseridos no banco de dados com sucesso.');
+            res.send('Dados recebidos e armazenados com sucesso.');
+        })
+        .catch(err => {
+            res.status(500).send('Erro ao processar os dados.');
         });
 });
 
-// Rota para limpar todos os dados da tabela (protegida por JWT)
+// Rota para limpar todos os dados da tabela
 app.delete('/limpar-dados', authenticateJWT, (req, res) => {
     const query = `DELETE FROM dados_sensores`;
 
@@ -169,7 +223,7 @@ app.delete('/limpar-dados', authenticateJWT, (req, res) => {
     });
 });
 
-let isServicePaused = false; // Flag para controlar o estado do serviço
+let isServicePaused = false; 
 
 // Rota para pausar/reiniciar o serviço
 app.post('/pausar-servico', authenticateJWT, (req, res) => {
